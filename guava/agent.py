@@ -108,10 +108,12 @@ class GuavaAgent:
         segmenter: str = "sam3",
         serial_gpu: bool = False,
         viz: bool = False,
+        trace: bool = False,
     ) -> None:
         self._env = low_level_env
         self._query = query_fn
         self._max_turns = max_turns
+        self._trace = trace
         self._tools = GuavaTools(low_level_env, segmenter=segmenter, serial_gpu=serial_gpu)
 
         # Live visualization: pop up an OpenCV window and play the frames
@@ -193,6 +195,15 @@ class GuavaAgent:
         ]
 
     # ------------------------------------------------------------------ #
+    def _trace_step(self, turn: int, tool: str, think: str, result: str, err: str | None) -> None:
+        """Print one turn's reasoning + tool live, as it happens."""
+        if not self._trace:
+            return
+        print(f"\n[turn {turn}] TOOL: {tool}", flush=True)
+        print(f"  THINK : {think if think else '(none)'}", flush=True)
+        print(f"  RESULT: {result!r}" + (f"  ERR: {err}" if err else ""), flush=True)
+
+    # ------------------------------------------------------------------ #
     def run_episode(self, task: str) -> EpisodeResult:
         messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         # First user turn: task + initial multimodal observation.
@@ -217,6 +228,8 @@ class GuavaAgent:
                 result.done_reason = "task_complete" if is_done else "task_failed"
                 result.success = bool(is_done) and self._check_success()
                 result.steps.append(StepRecord(turn, response, think, None, {}, "", None))
+                self._trace_step(turn, "(FINISH)", think,
+                                 "task_complete" if is_done else "task_failed", None)
                 break
 
             if tc is None or "name" not in tc:
@@ -228,6 +241,7 @@ class GuavaAgent:
                        'a <think>...</think> block then exactly one '
                        '<tool_call>{"name": ..., "arguments": {...}}</tool_call>.')
                 result.steps.append(StepRecord(turn, response, think, None, {}, "", err))
+                self._trace_step(turn, "(malformed — no tool)", think, "", err)
                 recovery = [{"type": "text", "text": err}]
                 recovery += self._build_observation_content(last_result, last_tool)
                 messages.append({"role": "user", "content": recovery})
@@ -252,6 +266,7 @@ class GuavaAgent:
             self._viz_play_since(viz_start, f"turn {turn}: {name}")
 
             result.steps.append(StepRecord(turn, response, think, name, args, last_result, err))
+            self._trace_step(turn, f"{name}({args})", think, last_result, err)
 
             # Early environment-side success check (sparse task reward).
             if self._check_success():

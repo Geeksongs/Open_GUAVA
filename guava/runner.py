@@ -109,26 +109,19 @@ def main(args: RunArgs) -> None:
         for trial in range(args.trials):
             env = get_env(args.env, enable_render=True)
             env.reset(seed=trial, options={"trial": trial})
+            if args.trace:
+                print(f"\n===== trial {trial:02d} =====", flush=True)
             agent = GuavaAgent(
                 env, query_fn, max_turns=args.max_turns,
                 segmenter=args.segmenter, serial_gpu=args.serial_gpu, viz=args.viz,
+                trace=args.trace,
             )
             last_agent = agent
-            res = agent.run_episode(args.task)
+            res = agent.run_episode(args.task)  # prints think+tool live when trace=True
             agent.close_viz()
             agent._tools.close()  # tear down the serial GPU-slot servers
             successes += int(res.success)
             total_tokens += res.total_tokens
-
-            if args.trace:
-                print(f"\n----- trial {trial:02d} trajectory -----")
-                for s in res.steps:
-                    tag = f"{s.tool_name}({s.arguments})" if s.tool_name else "(FINISH)"
-                    print(f"[turn {s.turn}] TOOL: {tag}")
-                    print(f"  THINK : {s.think if s.think else '(none)'}")
-                    print(f"  RESULT: {s.result!r}"
-                          + (f"  ERR: {s.error}" if s.error else ""))
-                print("-" * 38)
 
             print(
                 f"[trial {trial:02d}] success={res.success} reason={res.done_reason} "
