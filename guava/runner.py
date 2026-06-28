@@ -44,6 +44,9 @@ class RunArgs:
     (OWL-ViT+SAM2 fallback). SAM3 requires approved HuggingFace gated access."""
     serial_gpu: bool = False
     """Serialize SAM3<->GraspNet on one GPU (for small-VRAM cards)."""
+    viz: bool = False
+    """Pop up a live OpenCV window animating the robot's motion each turn
+    (requires a display). Records every sim step for smooth playback."""
     trials: int = 15
     max_turns: int = 20
     temperature: float = 0.0
@@ -88,9 +91,10 @@ def main(args: RunArgs) -> None:
         env.reset(seed=trial, options={"trial": trial})
         agent = GuavaAgent(
             env, query_fn, max_turns=args.max_turns,
-            segmenter=args.segmenter, serial_gpu=args.serial_gpu,
+            segmenter=args.segmenter, serial_gpu=args.serial_gpu, viz=args.viz,
         )
         res = agent.run_episode(args.task)
+        agent.close_viz()
         successes += int(res.success)
         total_tokens += res.total_tokens
         print(

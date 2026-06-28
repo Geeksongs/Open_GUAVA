@@ -107,11 +107,68 @@ class GuavaAgent:
         max_turns: int = 20,
         segmenter: str = "sam3",
         serial_gpu: bool = False,
+        viz: bool = False,
     ) -> None:
         self._env = low_level_env
         self._query = query_fn
         self._max_turns = max_turns
         self._tools = GuavaTools(low_level_env, segmenter=segmenter, serial_gpu=serial_gpu)
+
+        # Live visualization: pop up an OpenCV window and play the frames
+        # recorded during each tool's motion, so the robot is shown moving.
+        self._viz = viz
+        self._viz_im = None
+        self._viz_txt = None
+        if viz:
+            # Record EVERY sim step (not the default every-5th) so the played-back
+            # motion is a smooth animation rather than a coarse flip-book.
+            if hasattr(self._env, "_subsample_rate"):
+                self._env._subsample_rate = 1
+            if hasattr(self._env, "enable_video_capture"):
+                self._env.enable_video_capture(True, clear=True)
+            # OpenCV here is the headless build (no GUI), so use matplotlib with
+            # the Tk backend for a live, updating animation window.
+            import matplotlib
+            matplotlib.use("TkAgg", force=True)
+            import matplotlib.pyplot as plt
+            self._plt = plt
+            plt.ion()
+            self._viz_fig, self._viz_ax = plt.subplots(figsize=(6, 6))
+            self._viz_ax.axis("off")
+            self._viz_fig.canvas.manager.set_window_title("GUAVA")
+            self._viz_im = self._viz_ax.imshow(np.zeros((512, 512, 3), np.uint8))
+            self._viz_txt = self._viz_ax.text(
+                8, 24, "", color="lime", fontsize=12, weight="bold")
+            plt.show(block=False)
+
+    # ------------------------------------------------------------------ #
+    def _viz_show(self, frame: np.ndarray, label: str) -> None:
+        self._viz_im.set_data(np.asarray(frame).astype(np.uint8))
+        self._viz_txt.set_text(label)
+        self._viz_fig.canvas.draw_idle()
+        self._viz_fig.canvas.flush_events()
+        self._plt.pause(0.001)
+
+    def _viz_play_since(self, start_frame: int, label: str) -> None:
+        """Animate frames recorded since ``start_frame`` in the live window."""
+        if not self._viz:
+            return
+        frames = []
+        if hasattr(self._env, "get_video_frames_range") and hasattr(self._env, "get_video_frame_count"):
+            frames = self._env.get_video_frames_range(start_frame, self._env.get_video_frame_count())
+        if not frames:  # no motion recorded -> show the current frame
+            frames = [self._render_image()]
+        for f in frames:
+            self._viz_show(f, label)
+
+    def _viz_frame_count(self) -> int:
+        if self._viz and hasattr(self._env, "get_video_frame_count"):
+            return self._env.get_video_frame_count()
+        return 0
+
+    def close_viz(self) -> None:
+        if self._viz:
+            self._plt.close(self._viz_fig)
 
     # ------------------------------------------------------------------ #
     def _render_image(self) -> np.ndarray:
@@ -178,6 +235,7 @@ class GuavaAgent:
                 continue
 
             name, args = tc["name"], tc.get("arguments", {}) or {}
+            viz_start = self._viz_frame_count()  # frame index before this tool moves
             try:
                 tool_out = self._tools.dispatch(name, args)
                 last_result = tool_out if isinstance(tool_out, str) else json.dumps(tool_out)
@@ -189,6 +247,9 @@ class GuavaAgent:
                 last_result = f"[err] motion failed: {exc}"
                 err = str(exc)
             last_tool = name
+
+            # Play the robot motion for this tool in the live window.
+            self._viz_play_since(viz_start, f"turn {turn}: {name}")
 
             result.steps.append(StepRecord(turn, response, think, name, args, last_result, err))
 
