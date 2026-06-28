@@ -142,7 +142,39 @@ your reasoning when necessary.
 
 Tool Definition
 {tool_definitions}
-""".format(tool_definitions=_render_tool_definitions())
+
+Output Format (STRICT)
+Every response MUST have exactly two parts, in this order:
+  1. A <think>...</think> block containing your reasoning. This block is
+     REQUIRED -- never omit it and never leave it empty.
+  2. EITHER a single <tool_call>...</tool_call> line, OR the phrase
+     "Task complete" / "Task failed" when finished.
+Do not output anything else. Do not call more than one tool per response.
+
+Examples (illustrative trajectories; follow this exact format)
+{few_shot}
+""".format(tool_definitions=_render_tool_definitions(), few_shot="{few_shot}")
+
+
+# ---------------------------------------------------------------------------
+# Few-shot examples (reasoning style transcribed from the GUAVA paper appendix
+# figures 7/12/13).  IMPORTANT: each example is a SINGLE turn -- one observation
+# -> one <think> + one tool call -- because that is exactly what the model emits
+# per turn.  We deliberately do NOT show full multi-step trajectories: the
+# running history already lives in the conversation, so replaying it here would
+# only waste tokens and risk the model dumping several steps at once.
+# ---------------------------------------------------------------------------
+
+FEW_SHOT_EXAMPLES = """\
+Example of one turn (this is a SINGLE response -- emit exactly one like this):
+<think>The orange is on the table at front-left and the gripper is open above the back of the table. I should first move above the orange with some clearance before grasping.</think>
+<tool_call>{"name": "align", "arguments": {"object": "orange", "position": "top", "clearance": "medium"}}</tool_call>
+"""
+
+# Use replace (not .format) here: the prompt already contains literal JSON
+# braces like {"name": ...} from the Tool Calling section, which .format would
+# misparse as fields.
+SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{few_shot}", FEW_SHOT_EXAMPLES)
 
 
 # ---------------------------------------------------------------------------

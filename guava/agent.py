@@ -163,10 +163,17 @@ class GuavaAgent:
                 break
 
             if tc is None or "name" not in tc:
-                # Malformed turn: tell the model and continue (recovery).
-                err = "No valid <tool_call> found. Emit exactly one tool call."
+                # Malformed turn: re-attach the current observation (image + state)
+                # alongside a format reminder, rather than a bare text error.
+                # Stripping the visual context here was causing a single bad
+                # response to cascade into repeated malformed turns.
+                err = ('Your last response had no valid <tool_call>. Respond with '
+                       'a <think>...</think> block then exactly one '
+                       '<tool_call>{"name": ..., "arguments": {...}}</tool_call>.')
                 result.steps.append(StepRecord(turn, response, think, None, {}, "", err))
-                messages.append({"role": "user", "content": [{"type": "text", "text": err}]})
+                recovery = [{"type": "text", "text": err}]
+                recovery += self._build_observation_content(last_result, last_tool)
+                messages.append({"role": "user", "content": recovery})
                 last_result, last_tool = None, None
                 continue
 

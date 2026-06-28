@@ -46,7 +46,9 @@ class RunArgs:
     """Serialize SAM3<->GraspNet on one GPU (for small-VRAM cards)."""
     trials: int = 15
     max_turns: int = 20
-    temperature: float = 0.2
+    temperature: float = 0.0
+    """Deterministic decoding (greedy) -- avoids random malformed responses that
+    can derail the ReAct loop."""
     max_tokens: int = 512000
     """Output token cap. Set to MiniMax M3's maximum (512000) so generation is
     effectively unconstrained -- the model emits its full <think> + tool call."""
