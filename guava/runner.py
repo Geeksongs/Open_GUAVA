@@ -40,7 +40,8 @@ class RunArgs:
     """LLM id (routed through the CaP-X proxy, OpenRouter-compatible)."""
     server_url: str = OPENROUTER_SERVER_URL
     segmenter: str = "sam3"
-    """Segmentation backend: 'sam3' (paper-faithful) or 'sam2' (OWL-ViT+SAM2, ungated)."""
+    """Segmentation backend: 'sam3' (paper-faithful, default) or 'sam2'
+    (OWL-ViT+SAM2 fallback). SAM3 requires approved HuggingFace gated access."""
     serial_gpu: bool = False
     """Serialize SAM3<->GraspNet on one GPU (for small-VRAM cards)."""
     trials: int = 15

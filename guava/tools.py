@@ -35,8 +35,11 @@ from capx.utils.depth_utils import depth_to_pointcloud
 
 
 # Top-down grasp orientation (gripper pointing -Z), quaternion wxyz.
-# Matches the "top-down" convention used throughout the CaP-X Franka stack.
-_TOP_DOWN_QUAT_WXYZ = np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float64)
+# [0,0,1,0] = 180 deg about Y -- the orientation CaP-X's privileged
+# sample_grasp_pose returns for the Franka cube tasks, verified to give reliable
+# top-down grasps (the IK + TCP resolve cleanly).  Using GraspNet's own tilted
+# 6-DoF orientation instead caused missed grasps on these small cubes.
+_TOP_DOWN_QUAT_WXYZ = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float64)
 
 # Standoff distances (meters) for the `clearance` enum {small, medium, large}.
 _CLEARANCE = {"small": 0.05, "medium": 0.10, "large": 0.18}
@@ -244,7 +247,11 @@ class GuavaTools:
         best_T_cam = grasp_poses[int(np.argmax(scores))]
         T_base = np.asarray(extrinsics, dtype=np.float64) @ best_T_cam
         grasp_pos = T_base[:3, 3]
-        grasp_quat = vtf.SO3.from_matrix(T_base[:3, :3]).wxyz
+        # Use GraspNet's accurate position but a top-down orientation: GraspNet's
+        # full 6-DoF orientation is often tilted on small cubes and produces
+        # awkward IK that misses, whereas top-down resolves cleanly (matches the
+        # privileged grasp orientation and was verified to lift reliably).
+        grasp_quat = _TOP_DOWN_QUAT_WXYZ
 
         self._api.open_gripper()
         # Pre-grasp standoff above target, then descend.
@@ -252,9 +259,20 @@ class GuavaTools:
         self._move_to(grasp_pos, grasp_quat)
         self._api.close_gripper()
 
-        frac = float(getattr(self._env, "_gripper_fraction", 0.0))
-        # Per Appendix B: gripper cannot fully close => something is grasped.
-        return "grasped" if frac > 0.02 else "closed"
+        # Per Appendix B: if the gripper cannot fully close, something is held.
+        # The commanded gripper fraction is not a contact signal, so read the
+        # actual finger gap (robot0_gripper_qpos): an empty gripper closes to ~0,
+        # a held object keeps the fingers apart.
+        return "grasped" if self._gripper_finger_gap() > 0.005 else "closed"
+
+    def _gripper_finger_gap(self) -> float:
+        """Actual gripper opening (m) from sim finger joints; 0 when fully closed."""
+        try:
+            ro = self._env.robosuite_env._get_observations()
+            qpos = np.asarray(ro["robot0_gripper_qpos"], dtype=np.float64)
+            return float(np.abs(qpos).sum())
+        except Exception:  # noqa: BLE001 - fall back to commanded fraction
+            return float(getattr(self._env, "_gripper_fraction", 0.0)) * 0.04
 
     def align(self, object: str, position: str, clearance: str) -> str:
         if position not in _DIRECTION:
