@@ -3,7 +3,7 @@
 
 > **This is the first Unofficial, community reproduction of the GUAVA paper** ("Guava: An
 > Effective and Universal Harness for Embodied Manipulation", Liu et al., 2026,
-> [arXiv:2606.18363](https://arxiv.org/abs/2606.18363)).
+> [arXiv:2606.18363](https://arxiv.org/abs/2606.18363)). Even though they have not yet opened source :)
 >
 > This repository is **not affiliated with, nor endorsed by, the original GUAVA
 > authors**. It reimplements GUAVA's *harness* — the three design principles of
