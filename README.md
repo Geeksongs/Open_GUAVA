@@ -1,7 +1,7 @@
 
 # Open_GUAVA
 
-> **Unofficial, community reproduction of the GUAVA harness** ("Guava: An
+> **This is the first Unofficial, community reproduction of the GUAVA paper** ("Guava: An
 > Effective and Universal Harness for Embodied Manipulation", Liu et al., 2026,
 > [arXiv:2606.18363](https://arxiv.org/abs/2606.18363)).
 >
