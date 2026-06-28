@@ -47,3 +47,6 @@ wandb/
 *.ico
 *.webp
 check.md
+
+# GUAVA paper PDF (link to arXiv instead of redistributing)
+guava.pdf

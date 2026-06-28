@@ -1,0 +1,213 @@
+"""GUAVA ReAct agent loop: iterative perception-reasoning-action.
+
+Implements the closed-loop interaction described in the paper (Section 3.1,
+Appendix A.1, Figures 7/8/11/12/13):
+
+    repeat:
+        observation = (RGB image, symbolic gripper state, last tool result)
+        response    = VLM(system_prompt, history + observation)
+        <think> ...reasoning... </think>
+        <tool_call>{"name": ..., "arguments": {...}}</tool_call>
+        result      = tools.dispatch(name, arguments)
+    until "Task complete" / "Task failed" / step budget exhausted
+
+This is deliberately *not* CaP-X's one-shot code-generation executor: GUAVA
+emits exactly one semantic tool call per turn and re-grounds on a fresh
+multimodal observation, which is what makes it token-efficient and
+failure-recoverable.
+"""
+
+from __future__ import annotations
+
+import base64
+import io
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+import numpy as np
+from PIL import Image
+
+from guava.prompts import (
+    GRIPPER_STATE_TEMPLATE,
+    SYSTEM_PROMPT,
+    TASK_TEMPLATE,
+    TOOL_RESULT_TEMPLATE,
+)
+from guava.tools import GuavaToolError, GuavaTools
+
+_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+_DONE_RE = re.compile(r"task\s+complete", re.IGNORECASE)
+_FAIL_RE = re.compile(r"task\s+failed", re.IGNORECASE)
+
+
+@dataclass
+class StepRecord:
+    turn: int
+    response: str
+    think: str
+    tool_name: str | None
+    arguments: dict[str, Any]
+    result: str
+    error: str | None = None
+
+
+@dataclass
+class EpisodeResult:
+    task: str
+    success: bool
+    done_reason: str  # "task_complete" | "task_failed" | "step_limit" | "error"
+    num_turns: int
+    steps: list[StepRecord] = field(default_factory=list)
+    total_tokens: int = 0
+
+
+def _img_to_data_url(img: np.ndarray) -> str:
+    pil = Image.fromarray(np.asarray(img).astype(np.uint8))
+    buf = io.BytesIO()
+    pil.save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _parse_response(text: str) -> tuple[str, dict | None, bool, bool]:
+    """Extract (think, tool_call_or_None, is_done, is_failed) from a response."""
+    think_m = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
+    think = think_m.group(1).strip() if think_m else ""
+    done, failed = bool(_DONE_RE.search(text)), bool(_FAIL_RE.search(text))
+    tc = None
+    m = _TOOL_CALL_RE.search(text)
+    if m:
+        try:
+            tc = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            tc = None
+    return think, tc, done, failed
+
+
+class GuavaAgent:
+    """Drives one or more episodes of the GUAVA harness over a CaP-X env.
+
+    Parameters
+    ----------
+    low_level_env:
+        Constructed CaP-X low-level env.
+    query_fn:
+        Callable ``(messages: list[dict]) -> dict`` returning at least
+        ``{"content": str, "usage_tokens": int}``.  Wraps whatever LLM backend
+        you use (see ``guava.runner`` for the CaP-X OpenRouter proxy wiring).
+    max_turns:
+        Step budget per episode (the paper uses a finite execution horizon).
+    """
+
+    def __init__(
+        self,
+        low_level_env: Any,
+        query_fn: Callable[[list[dict]], dict],
+        max_turns: int = 20,
+        segmenter: str = "sam3",
+        serial_gpu: bool = False,
+    ) -> None:
+        self._env = low_level_env
+        self._query = query_fn
+        self._max_turns = max_turns
+        self._tools = GuavaTools(low_level_env, segmenter=segmenter, serial_gpu=serial_gpu)
+
+    # ------------------------------------------------------------------ #
+    def _render_image(self) -> np.ndarray:
+        if hasattr(self._env, "render"):
+            return self._env.render()
+        obs = self._env.get_observation()
+        return obs[self._tools._camera]["images"]["rgb"]
+
+    def _build_observation_content(self, last_result: str | None, last_tool: str | None) -> list[dict]:
+        """Multimodal observation: image + symbolic gripper state + last result."""
+        gs = self._tools.gripper_state()
+        text = GRIPPER_STATE_TEMPLATE.format(
+            px=gs["position"][0], py=gs["position"][1], pz=gs["position"][2],
+            roll=gs["rpy_deg"][0], pitch=gs["rpy_deg"][1], yaw=gs["rpy_deg"][2],
+            opening=gs["opening_pct"],
+        )
+        if last_result is not None:
+            text = TOOL_RESULT_TEMPLATE.format(tool=last_tool, result=last_result) + "\n" + text
+        return [
+            {"type": "text", "text": text},
+            {"type": "image_url", "image_url": {"url": _img_to_data_url(self._render_image())}},
+        ]
+
+    # ------------------------------------------------------------------ #
+    def run_episode(self, task: str) -> EpisodeResult:
+        messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        # First user turn: task + initial multimodal observation.
+        first = [{"type": "text", "text": TASK_TEMPLATE.format(task=task)}]
+        first += self._build_observation_content(None, None)
+        messages.append({"role": "user", "content": first})
+
+        result = EpisodeResult(task=task, success=False, done_reason="step_limit", num_turns=0)
+        last_result: str | None = None
+        last_tool: str | None = None
+
+        for turn in range(self._max_turns):
+            out = self._query(messages)
+            response = out["content"]
+            result.total_tokens += int(out.get("usage_tokens", 0))
+            messages.append({"role": "assistant", "content": response})
+
+            think, tc, is_done, is_failed = _parse_response(response)
+
+            if is_done or is_failed:
+                result.num_turns = turn + 1
+                result.done_reason = "task_complete" if is_done else "task_failed"
+                result.success = bool(is_done) and self._check_success()
+                result.steps.append(StepRecord(turn, response, think, None, {}, "", None))
+                break
+
+            if tc is None or "name" not in tc:
+                # Malformed turn: tell the model and continue (recovery).
+                err = "No valid <tool_call> found. Emit exactly one tool call."
+                result.steps.append(StepRecord(turn, response, think, None, {}, "", err))
+                messages.append({"role": "user", "content": [{"type": "text", "text": err}]})
+                last_result, last_tool = None, None
+                continue
+
+            name, args = tc["name"], tc.get("arguments", {}) or {}
+            try:
+                tool_out = self._tools.dispatch(name, args)
+                last_result = tool_out if isinstance(tool_out, str) else json.dumps(tool_out)
+                err = None
+            except GuavaToolError as exc:
+                last_result = f"[err] {exc}"
+                err = str(exc)
+            except Exception as exc:  # noqa: BLE001 - surfaced to agent for recovery
+                last_result = f"[err] motion failed: {exc}"
+                err = str(exc)
+            last_tool = name
+
+            result.steps.append(StepRecord(turn, response, think, name, args, last_result, err))
+
+            # Early environment-side success check (sparse task reward).
+            if self._check_success():
+                result.num_turns = turn + 1
+                result.done_reason = "task_complete"
+                result.success = True
+                break
+
+            messages.append({"role": "user", "content": self._build_observation_content(last_result, last_tool)})
+        else:
+            result.num_turns = self._max_turns
+
+        return result
+
+    # ------------------------------------------------------------------ #
+    def _check_success(self) -> bool:
+        if hasattr(self._env, "task_completed"):
+            try:
+                return bool(self._env.task_completed())
+            except Exception:  # noqa: BLE001
+                return False
+        if hasattr(self._env, "compute_reward"):
+            try:
+                return float(self._env.compute_reward()) >= 1.0
+            except Exception:  # noqa: BLE001
+                return False
+        return False

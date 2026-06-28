@@ -1,5 +1,25 @@
 
+# Open_GUAVA
 
+> **Unofficial, community reproduction of the GUAVA harness** ("Guava: An
+> Effective and Universal Harness for Embodied Manipulation", Liu et al., 2026,
+> [arXiv:2606.18363](https://arxiv.org/abs/2606.18363)).
+>
+> This repository is **not affiliated with, nor endorsed by, the original GUAVA
+> authors**. It reimplements GUAVA's *harness* — the three design principles of
+> iterative perception-reasoning-action (ReAct) loops, semantic action
+> abstractions (the 9 tools of Appendix B), and multimodal observations — on top
+> of the open-source **CaP-X** framework (Fu et al., 2026,
+> [arXiv:2603.22435](https://arxiv.org/abs/2603.22435)), which provides the
+> RoboSuite environments and the SAM3 / Contact-GraspNet / PyRoKi perception and
+> motion stack.
+>
+> The reproduction lives in [`guava/`](guava/). The original CaP-X framework
+> (everything else in this repo) is included unmodified under its MIT license;
+> all CaP-X copyright and attribution are retained. See [`guava/README.md`](guava/README.md)
+> for how to run it.
+
+---
 
 # CaP-X
 
