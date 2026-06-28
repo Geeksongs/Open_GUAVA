@@ -31,11 +31,12 @@ from guava.agent import GuavaAgent
 
 @dataclass
 class RunArgs:
-    env: str = "franka_robosuite_cubes_low_level"
-    """CaP-X low-level env name (see capx/envs/base.py registry)."""
-    task: str = "stack the red cube on top of the green cube"
+    env: str = "franka_robosuite_cube_lift_low_level"
+    """CaP-X low-level env name (see capx/envs/base.py registry).
+    Default is the simplest task: lift the red cube."""
+    task: str = "Pick up the red cube and lift it."
     """Natural-language task instruction passed to the GUAVA system prompt."""
-    model: str = "openai/gpt-5.4"
+    model: str = "minimax/minimax-m3"
     """LLM id (routed through the CaP-X proxy, OpenRouter-compatible)."""
     server_url: str = OPENROUTER_SERVER_URL
     segmenter: str = "sam3"
@@ -45,7 +46,9 @@ class RunArgs:
     trials: int = 15
     max_turns: int = 20
     temperature: float = 0.2
-    max_tokens: int = 4096
+    max_tokens: int = 512000
+    """Output token cap. Set to MiniMax M3's maximum (512000) so generation is
+    effectively unconstrained -- the model emits its full <think> + tool call."""
     reasoning_effort: str = "medium"
     debug: bool = False
 

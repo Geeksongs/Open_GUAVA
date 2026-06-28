@@ -92,10 +92,15 @@ class GuavaTools:
             from guava.gpu_slot import GpuSlotManager
             self._slot = GpuSlotManager(device=gpu_device)
 
-    def _ensure_gpu(self, name: str) -> None:
-        """Make ``name`` the resident heavy server if serial-GPU mode is on."""
+    def _ensure_seg(self) -> None:
+        """Make the segmentation model group resident (serial-GPU mode only)."""
         if self._slot is not None:
-            self._slot.ensure(name)
+            self._slot.ensure_group("seg_sam2" if self._segmenter == "sam2" else "seg_sam3")
+
+    def _ensure_grasp(self) -> None:
+        """Make GraspNet resident, evicting the segmentation group (serial-GPU)."""
+        if self._slot is not None:
+            self._slot.ensure_group("graspnet")
 
     def close(self) -> None:
         """Tear down any managed perception server (frees VRAM)."""
@@ -132,7 +137,7 @@ class GuavaTools:
 
     def _segment_object_points(self, object_name: str) -> np.ndarray:
         """Segment `object_name` and return its 3D points (base frame)."""
-        self._ensure_gpu("sam3")  # serial-GPU: keep segmenter resident
+        self._ensure_seg()  # serial-GPU: keep segmentation group resident
         obs = self._api.get_observation()
         cam = obs[self._camera]
         rgb = cam["images"]["rgb"]
@@ -202,8 +207,8 @@ class GuavaTools:
     # The 9 semantic tools (Appendix B)
     # ------------------------------------------------------------------ #
     def grasp(self, object: str) -> str:
-        # --- Stage 1: segmentation (SAM3 resident on the GPU) ---
-        self._ensure_gpu("sam3")
+        # --- Stage 1: segmentation (segmentation group resident on the GPU) ---
+        self._ensure_seg()
         obs = self._api.get_observation()
         cam = obs[self._camera]
         rgb, depth, K = cam["images"]["rgb"], cam["images"]["depth"], cam["intrinsics"]
@@ -211,16 +216,31 @@ class GuavaTools:
 
         seg = self._segment_best_mask(rgb, object).astype(np.int32)
 
-        # --- Stage 2: grasp planning (evict SAM3, load GraspNet) ---
-        # SAM3 and GraspNet are used strictly in sequence within a grasp, so on
-        # a small GPU we free SAM3's VRAM before bringing up GraspNet.
-        self._ensure_gpu("graspnet")
-        grasp_poses, scores = self._api.plan_grasp(
-            depth=np.asarray(depth), intrinsics=np.asarray(K, dtype=np.float64),
-            segmentation=seg,
+        # --- Stage 2: grasp planning (evict segmentation group, load GraspNet) ---
+        # Segmentation and GraspNet run strictly in sequence within a grasp, so
+        # on a small GPU we free the segmentation models' VRAM before bringing up
+        # GraspNet, then they reload for the next perception call.
+        self._ensure_grasp()
+        # Call the Contact-GraspNet client directly with forward_passes=1.
+        # CaP-X's plan_grasp hardcodes forward_passes=3, whose inference
+        # transient (~1.8 GB) OOMs a 7-8 GB GPU; a single pass fits comfortably
+        # and still yields good grasps.  We then apply the same +0.12 m local-z
+        # approach offset that plan_grasp uses.
+        depth_np = np.asarray(depth)
+        if depth_np.ndim == 3 and depth_np.shape[-1] == 1:
+            depth_np = depth_np[:, :, 0]
+        seg_np = seg[:, :, 0] if seg.ndim == 3 else seg
+        grasp_cam, scores, _ = self._api.grasp_net_plan_fn(
+            depth_np, np.asarray(K, dtype=np.float64), seg_np, 1,
+            z_range=[0.2, 2.0], forward_passes=1,
         )
         if scores is None or len(scores) == 0:
             raise GuavaToolError(f"No grasp proposal for '{object}'.")
+        grasp_cam = np.asarray(grasp_cam, dtype=np.float64)
+        grasp_poses = (
+            vtf.SE3.from_matrix(grasp_cam)
+            @ vtf.SE3.from_translation(np.array([0.0, 0.0, 0.12]))
+        ).as_matrix()
         best_T_cam = grasp_poses[int(np.argmax(scores))]
         T_base = np.asarray(extrinsics, dtype=np.float64) @ best_T_cam
         grasp_pos = T_base[:3, 3]

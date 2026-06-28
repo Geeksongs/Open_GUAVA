@@ -1,43 +1,50 @@
 """Single-GPU-slot manager for serial heavy-model execution.
 
-On a small GPU (e.g. an RTX 4060 with ~7-8 GB) the SAM3 segmentation server and
-the Contact-GraspNet server cannot comfortably stay resident at the same time.
-But within a single ``grasp(object)`` call they are used *sequentially* -- first
-SAM3 segments the object, then GraspNet plans a grasp on that mask.  So we only
-ever need **one heavy model on the GPU at a time**.
+On a small GPU (e.g. an RTX 4060 with ~7-8 GB) the segmentation models
+(OWL-ViT + SAM2, or SAM3) and the Contact-GraspNet model cannot all stay
+resident at once -- their idle footprints plus GraspNet's inference transient
+overflow VRAM.  But within a single ``grasp(object)`` call they are used in a
+strict sequence: first the object is segmented, then a grasp is planned on that
+mask.  So we only ever need **one model group on the GPU at a time**.
 
-This manager runs each heavy perception model as a subprocess (reusing CaP-X's
-already-tested ``capx/serving/launch_*_server.py``) and guarantees that starting
-one server first tears down the other, freeing its VRAM.  PyRoKi IK (8116) is
-light and is intentionally *not* managed here -- keep it resident.
+This manager runs each perception model as a subprocess (reusing CaP-X's
+already-tested ``capx/serving/launch_*_server.py``) and keeps exactly one
+*group* resident, tearing down the others to free their VRAM:
 
-The CaP-X client functions (``init_sam3``/``init_contact_graspnet``) are thin
-HTTP clients that hit fixed localhost ports, so swapping the backing server
-process is transparent to them.
+    group "seg"      -> OWL-ViT (8117) + SAM2 (8113)     [segmenter="sam2"]
+                     -> SAM3 (8114)                       [segmenter="sam3"]
+    group "graspnet" -> Contact-GraspNet (8115)
 
-Usage
------
-    slot = GpuSlotManager(device="cuda")
-    slot.ensure("sam3")       # SAM3 resident, GraspNet (if any) torn down
-    ... call segment client (port 8114) ...
-    slot.ensure("graspnet")   # SAM3 torn down, GraspNet resident
-    ... call grasp client (port 8115) ...
-    slot.stop_all()
+PyRoKi IK (8116) is light (JAX/CPU, ~0 VRAM) and is intentionally not managed
+here -- launch it once and leave it resident.
+
+The CaP-X client functions hit fixed localhost ports, so swapping the backing
+server process is transparent to them.  The cost is a model (re)load whenever the
+resident group changes -- the price of running everything on one small GPU.
 """
 
 from __future__ import annotations
 
+import os
 import socket
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 
-# name -> (server script, port).  Ports must match the client SERVICE_URLs in
-# capx/integrations/vision/{sam3,graspnet}.py.
-_SERVERS: dict[str, tuple[str, int]] = {
-    "sam3": ("capx/serving/launch_sam3_server.py", 8114),
-    "graspnet": ("capx/serving/launch_contact_graspnet_server.py", 8115),
+# name -> (server script, port, extra CLI args)
+_SERVERS: dict[str, tuple[str, int, list[str]]] = {
+    "owlvit": ("capx/serving/launch_owlvit_server.py", 8117,
+               ["--model-name", "google/owlv2-base-patch16-ensemble"]),
+    "sam2": ("capx/serving/launch_sam2_server.py", 8113, []),
+    "sam3": ("capx/serving/launch_sam3_server.py", 8114, []),
+    "graspnet": ("capx/serving/launch_contact_graspnet_server.py", 8115, []),
+}
+
+# Logical groups that are mutually exclusive on the GPU.
+_GROUPS: dict[str, list[str]] = {
+    "seg_sam2": ["owlvit", "sam2"],
+    "seg_sam3": ["sam3"],
+    "graspnet": ["graspnet"],
 }
 
 
@@ -47,28 +54,17 @@ def _port_open(host: str, port: int, timeout: float = 1.0) -> bool:
         return s.connect_ex((host, port)) == 0
 
 
-@dataclass
-class _Running:
-    name: str
-    proc: subprocess.Popen
-
-
 class GpuSlotManager:
-    """Ensures at most one heavy perception server holds the GPU at a time.
+    """Keeps exactly one mutually-exclusive model group resident on the GPU.
 
     Parameters
     ----------
-    device:
-        CUDA device string passed to the server (e.g. ``"cuda"`` or ``"cuda:0"``).
-    host:
-        Host the servers bind to (must match the client SERVICE_URLs).
-    startup_timeout:
-        Seconds to wait for a freshly launched server's port to come up.  The
-        CaP-X servers load their model *before* calling ``uvicorn.run``, so an
-        open port implies the model is ready.
-    python_exe:
-        Interpreter used to launch the server subprocess (defaults to the
-        current interpreter, i.e. the capx conda env).
+    device:        CUDA device string for the servers.
+    host:          Host the servers bind to (matches the client SERVICE_URLs).
+    startup_timeout: Seconds to wait for a launched server's port to come up.
+                   (CaP-X servers load their model *before* ``uvicorn.run``, so
+                   an open port implies the model is ready.)
+    python_exe:    Interpreter for the server subprocess (defaults to current).
     """
 
     def __init__(
@@ -82,44 +78,44 @@ class GpuSlotManager:
         self.host = host
         self.startup_timeout = startup_timeout
         self.python_exe = python_exe or sys.executable
-        self._current: _Running | None = None
+        self._running: dict[str, subprocess.Popen] = {}
+        self._group: str | None = None
 
     # ------------------------------------------------------------------ #
-    def ensure(self, name: str) -> None:
-        """Make ``name`` the resident heavy server, tearing down any other.
-
-        Idempotent: if ``name`` is already resident (or an externally launched
-        server is already serving its port), this is a no-op.
-        """
-        if name not in _SERVERS:
-            raise ValueError(f"unknown heavy server '{name}', expected {list(_SERVERS)}")
-        script, port = _SERVERS[name]
-
-        # Already the current managed server?
-        if self._current is not None and self._current.name == name:
-            if self._current.proc.poll() is None and _port_open(self.host, port):
-                return
-            # died -> fall through to relaunch
-
-        # An externally pre-launched server already owns this port: defer to it
-        # (big-GPU setups where the user ran launch_servers.py themselves).
-        if self._current is None and _port_open(self.host, port):
+    def ensure_group(self, group: str) -> None:
+        """Make ``group`` the sole resident model group, evicting the others."""
+        if group not in _GROUPS:
+            raise ValueError(f"unknown group '{group}', expected {list(_GROUPS)}")
+        if self._group == group and all(
+            _port_open(self.host, _SERVERS[n][1]) for n in _GROUPS[group]
+        ):
             return
 
-        # Evict whatever is currently loaded to free VRAM.
-        self._teardown_current()
+        wanted = set(_GROUPS[group])
+        # Evict any managed server not in the wanted group (frees VRAM).
+        for name in list(self._running):
+            if name not in wanted:
+                self._teardown(name)
 
-        # Launch the requested server.
-        proc = subprocess.Popen(
-            [self.python_exe, script, "--device", self.device,
-             "--port", str(port), "--host", self.host],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        self._current = _Running(name=name, proc=proc)
-        self._wait_until_ready(name, port, proc)
+        # Start any wanted server not already serving.
+        for name in _GROUPS[group]:
+            self._start(name)
+
+        self._group = group
 
     # ------------------------------------------------------------------ #
-    def _wait_until_ready(self, name: str, port: int, proc: subprocess.Popen) -> None:
+    def _start(self, name: str) -> None:
+        script, port, extra = _SERVERS[name]
+        if _port_open(self.host, port):
+            return  # already serving (managed or externally launched)
+        env = dict(os.environ)
+        env["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+        proc = subprocess.Popen(
+            [self.python_exe, script, "--device", self.device,
+             "--port", str(port), "--host", self.host, *extra],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+        )
+        self._running[name] = proc
         deadline = time.time() + self.startup_timeout
         while time.time() < deadline:
             if proc.poll() is not None:
@@ -127,13 +123,13 @@ class GpuSlotManager:
             if _port_open(self.host, port):
                 return
             time.sleep(1.0)
-        self._teardown_current()
+        self._teardown(name)
         raise TimeoutError(f"{name} server did not come up within {self.startup_timeout}s")
 
-    def _teardown_current(self) -> None:
-        if self._current is None:
+    def _teardown(self, name: str) -> None:
+        proc = self._running.pop(name, None)
+        if proc is None:
             return
-        proc = self._current.proc
         if proc.poll() is None:
             proc.terminate()
             try:
@@ -141,12 +137,12 @@ class GpuSlotManager:
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=10.0)
-        self._current = None
-        # Give the driver a moment to reclaim VRAM before the next load.
-        time.sleep(1.0)
+        time.sleep(1.0)  # let the driver reclaim VRAM before the next load
 
     def stop_all(self) -> None:
-        self._teardown_current()
+        for name in list(self._running):
+            self._teardown(name)
+        self._group = None
 
     def __enter__(self) -> "GpuSlotManager":
         return self
