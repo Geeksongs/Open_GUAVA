@@ -67,8 +67,13 @@ TOOL_DEFINITIONS: list[dict[str, str]] = [
         "name": "move",
         "signature": 'move(x: float, y: float, z: float)',
         "doc": (
-            "Moves the robot end-effector to the Cartesian position [x, y, z] "
-            "(robot base frame, meters) via a position-based controller."
+            "Moves the robot end-effector to the ABSOLUTE Cartesian position "
+            "[x, y, z] (robot base frame, meters) via a position-based "
+            "controller. These are absolute world coordinates, NOT a relative "
+            "displacement. The gripper's current [x, y, z] is given in the "
+            "Gripper State every turn -- to lift a grasped object straight up, "
+            "reuse the current x and y and increase z (e.g. by ~0.2). Typical "
+            "table-top x is around 0.4-0.7, not 0."
         ),
     },
     {
@@ -137,7 +142,7 @@ Call exactly one tool by emitting a single line of the form:
 
 Gripper State
 The gripper's current position [x, y, z], rotation [roll, pitch, yaw], and \
-gripper opening %% are provided at every turn. Use these values directly in \
+gripper opening % are provided at every turn. Use these values directly in \
 your reasoning when necessary.
 
 Tool Definition
