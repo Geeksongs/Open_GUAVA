@@ -47,6 +47,10 @@ class RunArgs:
     viz: bool = False
     """Pop up a live OpenCV window animating the robot's motion each turn
     (requires a display). Records every sim step for smooth playback."""
+    manage_servers: bool = True
+    """Auto-start the LLM proxy + PyRoKi (and clear stray perception servers in
+    serial mode) before running, and tear down what we started on exit. Set
+    --no-manage-servers if you launch the servers yourself."""
     trials: int = 15
     max_turns: int = 20
     temperature: float = 0.0
@@ -82,31 +86,56 @@ def make_query_fn(args: RunArgs):
 
 
 def main(args: RunArgs) -> None:
-    query_fn = make_query_fn(args)
+    from guava.services import ServiceManager
 
+    services = ServiceManager()
     successes = 0
     total_tokens = 0
-    for trial in range(args.trials):
-        env = get_env(args.env, enable_render=True)
-        env.reset(seed=trial, options={"trial": trial})
-        agent = GuavaAgent(
-            env, query_fn, max_turns=args.max_turns,
-            segmenter=args.segmenter, serial_gpu=args.serial_gpu, viz=args.viz,
-        )
-        res = agent.run_episode(args.task)
-        agent.close_viz()
-        successes += int(res.success)
-        total_tokens += res.total_tokens
-        print(
-            f"[trial {trial:02d}] success={res.success} reason={res.done_reason} "
-            f"turns={res.num_turns} tokens={res.total_tokens}"
-        )
+    last_agent = None
+    try:
+        if args.manage_servers:
+            # Bring up everything this run needs; tear it down on exit.
+            services.ensure_proxy()
+            services.ensure_pyroki()
+            if args.serial_gpu:
+                # The slot manager must exclusively own SAM3/GraspNet, so clear
+                # any stray perception servers that would hog VRAM.
+                services.free_perception_ports()
 
-    n = args.trials
-    print("=" * 60)
-    print(f"GUAVA harness | model={args.model} | task={args.task!r}")
-    print(f"Success rate : {successes}/{n} = {100.0 * successes / n:.1f}%")
-    print(f"Avg tokens/ep: {total_tokens / max(n, 1):.0f}")
+        query_fn = make_query_fn(args)
+        for trial in range(args.trials):
+            env = get_env(args.env, enable_render=True)
+            env.reset(seed=trial, options={"trial": trial})
+            agent = GuavaAgent(
+                env, query_fn, max_turns=args.max_turns,
+                segmenter=args.segmenter, serial_gpu=args.serial_gpu, viz=args.viz,
+            )
+            last_agent = agent
+            res = agent.run_episode(args.task)
+            agent.close_viz()
+            agent._tools.close()  # tear down the serial GPU-slot servers
+            successes += int(res.success)
+            total_tokens += res.total_tokens
+            print(
+                f"[trial {trial:02d}] success={res.success} reason={res.done_reason} "
+                f"turns={res.num_turns} tokens={res.total_tokens}"
+            )
+
+        n = args.trials
+        print("=" * 60)
+        print(f"GUAVA harness | model={args.model} | task={args.task!r}")
+        print(f"Success rate : {successes}/{n} = {100.0 * successes / n:.1f}%")
+        print(f"Avg tokens/ep: {total_tokens / max(n, 1):.0f}")
+    finally:
+        # Always clean up: GPU-slot servers + the proxy/PyRoKi we started.
+        try:
+            if last_agent is not None:
+                last_agent.close_viz()
+                last_agent._tools.close()
+        except Exception:  # noqa: BLE001
+            pass
+        if args.manage_servers:
+            services.shutdown()
 
 
 if __name__ == "__main__":
