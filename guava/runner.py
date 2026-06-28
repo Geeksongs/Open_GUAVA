@@ -51,6 +51,9 @@ class RunArgs:
     """Auto-start the LLM proxy + PyRoKi (and clear stray perception servers in
     serial mode) before running, and tear down what we started on exit. Set
     --no-manage-servers if you launch the servers yourself."""
+    trace: bool = True
+    """Print each turn's <think> reasoning and the chosen tool. --no-trace for
+    just the success/tokens summary."""
     trials: int = 15
     max_turns: int = 20
     temperature: float = 0.0
@@ -116,6 +119,17 @@ def main(args: RunArgs) -> None:
             agent._tools.close()  # tear down the serial GPU-slot servers
             successes += int(res.success)
             total_tokens += res.total_tokens
+
+            if args.trace:
+                print(f"\n----- trial {trial:02d} trajectory -----")
+                for s in res.steps:
+                    tag = f"{s.tool_name}({s.arguments})" if s.tool_name else "(FINISH)"
+                    print(f"[turn {s.turn}] TOOL: {tag}")
+                    print(f"  THINK : {s.think if s.think else '(none)'}")
+                    print(f"  RESULT: {s.result!r}"
+                          + (f"  ERR: {s.error}" if s.error else ""))
+                print("-" * 38)
+
             print(
                 f"[trial {trial:02d}] success={res.success} reason={res.done_reason} "
                 f"turns={res.num_turns} tokens={res.total_tokens}"
