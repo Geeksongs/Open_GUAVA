@@ -1,13 +1,14 @@
 """Auto start/stop of the background services GUAVA needs.
 
-So a run is a single command: the runner brings up the LLM proxy and PyRoKi
-(if not already running), and on exit tears down only what it started. In
-serial-GPU mode it also frees any stray perception servers (SAM3/SAM2/GraspNet/
-OWL-ViT) up front, since the single-GPU-slot manager must own them exclusively
--- a leftover GraspNet hogging VRAM is what makes SAM3 fail to load.
+So a run is a single command: the runner starts the LLM proxy and PyRoKi (owning
+them -- any stray instance on those ports is killed first), and on exit tears
+EVERYTHING down (proxy, PyRoKi, and all perception servers). In serial-GPU mode
+it also frees stray perception servers up front, since the single-GPU-slot
+manager must own them exclusively -- a leftover GraspNet hogging VRAM is what
+makes SAM3 fail to load.
 
-Services already running before the runner starts are left untouched (not killed
-on exit), so a shared proxy/PyRoKi keeps working.
+Net effect: every run opens all services on start and closes all of them on
+exit, leaving no background processes behind.
 """
 
 from __future__ import annotations
@@ -71,9 +72,13 @@ class ServiceManager:
 
     # ------------------------------------------------------------------ #
     def _launch(self, name: str, cmd: list[str], port: int, timeout: float = 240.0) -> None:
+        # Always own the service: if something is already on the port (a stray
+        # from a previous run), kill it and start fresh so we can guarantee a
+        # clean shutdown at the end.
         if port_open(port, self.host):
-            print(f"[services] {name} already on :{port}, reusing (won't stop it).")
-            return
+            print(f"[services] {name}: clearing stray server on :{port}")
+            kill_port(port)
+            time.sleep(2.0)
         print(f"[services] starting {name} on :{port} ...")
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self._started.append((name, proc))
@@ -114,7 +119,7 @@ class ServiceManager:
 
     # ------------------------------------------------------------------ #
     def shutdown(self) -> None:
-        """Stop only the services this manager started (reverse order)."""
+        """Stop everything: the proxy/PyRoKi we started + any perception servers."""
         for name, proc in reversed(self._started):
             if proc.poll() is None:
                 print(f"[services] stopping {name} ...")
@@ -124,6 +129,11 @@ class ServiceManager:
                 except subprocess.TimeoutExpired:
                     proc.kill()
         self._started.clear()
+        # Also clear any perception servers left by the GPU-slot manager.
+        for p in PERCEPTION_PORTS:
+            if port_open(p, self.host):
+                print(f"[services] stopping perception server on :{p}")
+                kill_port(p)
 
     def __enter__(self) -> "ServiceManager":
         return self
