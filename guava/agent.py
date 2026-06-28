@@ -70,18 +70,56 @@ def _img_to_data_url(img: np.ndarray) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
+def _extract_tool_json(text: str) -> dict | None:
+    """Pull the tool-call JSON out of a response, robustly.
+
+    Handles models that omit the closing </tool_call> tag (e.g. gpt-5-nano emits
+    `<tool_call>{...}` with no closer) and nested braces, by brace-matching the
+    object that follows the `<tool_call>` marker.  Falls back to the first
+    balanced JSON object containing a "name" key.
+    """
+    def _balanced_from(s: str, start: int) -> str | None:
+        depth = 0
+        for i in range(start, len(s)):
+            c = s[i]
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    return s[start:i + 1]
+        return None
+
+    marker = text.find("<tool_call>")
+    if marker != -1:
+        brace = text.find("{", marker)
+        if brace != -1:
+            obj = _balanced_from(text, brace)
+            if obj:
+                try:
+                    return json.loads(obj)
+                except json.JSONDecodeError:
+                    pass
+    # Fallback: first balanced {...} that parses and has a "name".
+    for i, c in enumerate(text):
+        if c == "{":
+            obj = _balanced_from(text, i)
+            if obj:
+                try:
+                    d = json.loads(obj)
+                    if isinstance(d, dict) and "name" in d:
+                        return d
+                except json.JSONDecodeError:
+                    continue
+    return None
+
+
 def _parse_response(text: str) -> tuple[str, dict | None, bool, bool]:
     """Extract (think, tool_call_or_None, is_done, is_failed) from a response."""
     think_m = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
     think = think_m.group(1).strip() if think_m else ""
     done, failed = bool(_DONE_RE.search(text)), bool(_FAIL_RE.search(text))
-    tc = None
-    m = _TOOL_CALL_RE.search(text)
-    if m:
-        try:
-            tc = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            tc = None
+    tc = _extract_tool_json(text)
     return think, tc, done, failed
 
 

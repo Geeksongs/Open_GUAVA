@@ -150,11 +150,15 @@ Tool Definition
 
 Output Format (STRICT)
 Every response MUST have exactly two parts, in this order:
-  1. A <think>...</think> block containing your reasoning. This block is
-     REQUIRED -- never omit it and never leave it empty.
-  2. EITHER a single <tool_call>...</tool_call> line, OR the phrase
-     "Task complete" / "Task failed" when finished.
-Do not output anything else. Do not call more than one tool per response.
+  1. A reasoning block that opens with <think> and CLOSES with </think>. Both
+     tags are required -- never omit the closing </think>, never leave it empty.
+  2. EITHER a tool call that opens with <tool_call> and CLOSES with </tool_call>,
+     containing one JSON object {{"name": ..., "arguments": {{...}}}} -- the
+     closing </tool_call> tag is REQUIRED and the JSON braces must be balanced --
+     OR, only when the task is finished, the phrase "Task complete" / "Task
+     failed".
+Emit exactly one tool call per response and nothing else. Always close every tag
+you open: </think> and </tool_call>.
 
 Examples (illustrative trajectories; follow this exact format)
 {few_shot}

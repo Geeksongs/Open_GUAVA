@@ -36,7 +36,7 @@ class RunArgs:
     Default is the simplest task: lift the red cube."""
     task: str = "Pick up the red cube and lift it."
     """Natural-language task instruction passed to the GUAVA system prompt."""
-    model: str = "minimax/minimax-m3"
+    model: str = "openai/gpt-5-nano"
     """LLM id (routed through the CaP-X proxy, OpenRouter-compatible)."""
     server_url: str = OPENROUTER_SERVER_URL
     segmenter: str = "sam3"
@@ -59,20 +59,60 @@ class RunArgs:
     temperature: float = 0.0
     """Deterministic decoding (greedy) -- avoids random malformed responses that
     can derail the ReAct loop."""
-    max_tokens: int = 512000
-    """Output token cap. Set to MiniMax M3's maximum (512000) so generation is
-    effectively unconstrained -- the model emits its full <think> + tool call."""
+    max_tokens: int = 0
+    """Output token cap. 0 = auto: query OpenRouter for this model's own output
+    limit (max_completion_tokens) and use it, so each model gets its correct
+    maximum (e.g. gpt-5-nano's ~400k context vs MiniMax M3's 512k output).
+    Set a positive value to override."""
     reasoning_effort: str = "medium"
     debug: bool = False
 
 
+def resolve_max_tokens(model: str, key_file: str = ".openrouterkey", fallback: int = 16384) -> int:
+    """Look up this model's own maximum output length from OpenRouter.
+
+    Returns the provider's ``max_completion_tokens`` if given, else the model's
+    ``context_length``, else ``fallback`` -- so every model is driven at its own
+    maximum without exceeding its context window.
+    """
+    try:
+        import requests
+        from pathlib import Path
+        headers = {}
+        kp = Path(key_file)
+        if kp.exists():
+            headers["Authorization"] = f"Bearer {kp.read_text().strip()}"
+        data = requests.get(
+            "https://openrouter.ai/api/v1/models", headers=headers, timeout=30
+        ).json()["data"]
+        mid = model[len("openrouter/"):] if model.startswith("openrouter/") else model
+        for m in data:
+            if m["id"] == mid:
+                tp = m.get("top_provider") or {}
+                mc = tp.get("max_completion_tokens")
+                ctx = m.get("context_length") or tp.get("context_length")
+                val = mc or ctx or fallback
+                # Reserve input budget: output + input must fit in the context
+                # window, so never request more than (context - 64k) as output
+                # (64k comfortably covers GUAVA's prompt + accumulated images).
+                if ctx:
+                    val = min(val, max(int(ctx) - 64000, 4096))
+                print(f"[runner] max_tokens auto for {mid}: {val} "
+                      f"(reported max_completion={mc}, context={ctx})")
+                return int(val)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[runner] max_tokens auto lookup failed ({exc}); using {fallback}")
+    return fallback
+
+
 def make_query_fn(args: RunArgs):
     """Return a ``messages -> {content, usage_tokens}`` callable over CaP-X proxy."""
+    max_tokens = args.max_tokens if args.max_tokens > 0 else resolve_max_tokens(args.model)
     qargs = ModelQueryArgs(
         model=args.model,
         server_url=args.server_url,
         temperature=args.temperature,
-        max_tokens=args.max_tokens,
+        max_tokens=max_tokens,
         reasoning_effort=args.reasoning_effort,
         debug=args.debug,
     )
