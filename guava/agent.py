@@ -147,11 +147,19 @@ class GuavaAgent:
         serial_gpu: bool = False,
         viz: bool = False,
         trace: bool = False,
+        vlm_camera: str = "agentview",
     ) -> None:
         self._env = low_level_env
         self._query = query_fn
         self._max_turns = max_turns
         self._trace = trace
+        # Camera the VLM (and the viz window) sees. The env's default camera is
+        # often robot-mounted / top-down (e.g. nut uses birdview), where the arm
+        # occludes the objects it hovers over. A fixed third-person view like
+        # agentview keeps the scene visible. Perception (SAM3/GraspNet) is
+        # unaffected -- it still uses the env's own camera and grounds on object
+        # names, so this only improves what the VLM sees to reason about.
+        self._vlm_camera = vlm_camera
         self._tools = GuavaTools(low_level_env, segmenter=segmenter, serial_gpu=serial_gpu)
 
         # Live visualization: pop up an OpenCV window and play the frames
@@ -190,16 +198,14 @@ class GuavaAgent:
         self._plt.pause(0.001)
 
     def _viz_play_since(self, start_frame: int, label: str) -> None:
-        """Animate frames recorded since ``start_frame`` in the live window."""
+        """Update the live window with the current VLM camera view.
+
+        Shows the same third-person ``vlm_camera`` the model sees, so the human
+        watches exactly what the VLM is reasoning over (one frame per turn).
+        """
         if not self._viz:
             return
-        frames = []
-        if hasattr(self._env, "get_video_frames_range") and hasattr(self._env, "get_video_frame_count"):
-            frames = self._env.get_video_frames_range(start_frame, self._env.get_video_frame_count())
-        if not frames:  # no motion recorded -> show the current frame
-            frames = [self._render_image()]
-        for f in frames:
-            self._viz_show(f, label)
+        self._viz_show(self._render_image(), label)
 
     def _viz_frame_count(self) -> int:
         if self._viz and hasattr(self._env, "get_video_frame_count"):
@@ -212,6 +218,18 @@ class GuavaAgent:
 
     # ------------------------------------------------------------------ #
     def _render_image(self) -> np.ndarray:
+        # Render the chosen third-person camera directly from the MuJoCo sim,
+        # independent of the env's perception camera (works for any camera in
+        # the model, even one not in the observation config).
+        if self._vlm_camera and hasattr(self._env, "robosuite_env"):
+            try:
+                w = getattr(self._env, "_render_width", 512)
+                h = getattr(self._env, "_render_height", 512)
+                img = self._env.robosuite_env.sim.render(
+                    width=w, height=h, camera_name=self._vlm_camera)
+                return np.asarray(img)[::-1]  # MuJoCo returns bottom-up
+            except Exception:  # noqa: BLE001 - fall back to env default camera
+                pass
         if hasattr(self._env, "render"):
             return self._env.render()
         obs = self._env.get_observation()

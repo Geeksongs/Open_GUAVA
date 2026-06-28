@@ -54,6 +54,11 @@ class RunArgs:
     trace: bool = True
     """Print each turn's <think> reasoning and the chosen tool. --no-trace for
     just the success/tokens summary."""
+    vlm_camera: str = "agentview"
+    """Third-person camera the VLM (and viz window) sees. A fixed external view
+    like 'agentview' / 'frontview' avoids the arm occluding objects (the env's
+    default e.g. birdview is top-down and gets blocked). Perception is
+    unaffected. Set '' to use the env's default camera."""
     trials: int = 15
     max_turns: int = 20
     temperature: float = 0.0
@@ -154,7 +159,7 @@ def main(args: RunArgs) -> None:
             agent = GuavaAgent(
                 env, query_fn, max_turns=args.max_turns,
                 segmenter=args.segmenter, serial_gpu=args.serial_gpu, viz=args.viz,
-                trace=args.trace,
+                trace=args.trace, vlm_camera=args.vlm_camera,
             )
             last_agent = agent
             res = agent.run_episode(args.task)  # prints think+tool live when trace=True
