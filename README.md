@@ -16,8 +16,42 @@
 >
 > The reproduction lives in [`guava/`](guava/). The original CaP-X framework
 > (everything else in this repo) is included unmodified under its MIT license;
-> all CaP-X copyright and attribution are retained. See [`guava/README.md`](guava/README.md)
-> for how to run it.
+> all CaP-X copyright and attribution are retained.
+
+## Running Open_GUAVA
+
+Open_GUAVA runs inside the standard CaP-X RoboSuite environment. After the
+[Installation](#installation) below (`uv sync --extra robosuite`), the only extra
+step is an LLM key:
+
+```bash
+# OpenRouter key for the LLM proxy (git-ignored, never committed)
+echo "sk-or-v1-your-key-here" > .openrouterkey
+```
+
+Then a **single command** runs everything — it auto-starts the LLM proxy and
+PyRoKi IK, runs the ReAct loop, and tears the services down on exit:
+
+```bash
+# Defaults: lift the red cube, 15 trials
+uv run --no-sync --active guava/runner.py
+
+# Choose a task + any model you like
+uv run --no-sync --active guava/runner.py \
+    --env franka_robosuite_cubes_restack_low_level \
+    --task "stack the red cube on top of the green cube" \
+    --model openai/gpt-5.4 --trials 15
+```
+
+- **`--model` takes any OpenRouter-routable LLM** (open or closed, any provider):
+  `openai/gpt-5.4`, `anthropic/claude-opus-4-8`, `google/gemini-3-pro`, … The
+  default is just a cheap pick.
+- No GPU access to SAM3? Add `--segmenter sam2`. Small-VRAM card? Add `--serial-gpu`.
+  Want a live motion window? Add `--viz`.
+
+It reports **success rate** (paper Table 2) and **avg tokens/episode** (Figure 9).
+Full flag reference and the list of available environments are in
+[`guava/README.md`](guava/README.md).
 
 ---
 
